@@ -3,3 +3,4 @@ __pycache__/
 .fresh/
 venv/
 .env
+.private/
