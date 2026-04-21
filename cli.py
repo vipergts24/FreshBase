@@ -1,3 +1,11 @@
+import os
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'), override=True)
+
+import os
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'), override=True)
+
 import typer
 from rich.console import Console
 from db.engine import init_db, get_session

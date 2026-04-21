@@ -20,8 +20,6 @@ class BuilderPod:
         prompts the LLM, and parses the response to physically apply code.
         Returns the raw text response, and a list of files modified.
         """
-        if not os.environ.get("OPENAI_API_KEY"):
-            return "Error: OPENAI_API_KEY environment variable is required.", []
 
         hot_context = hot_context or {}
 

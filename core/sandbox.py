@@ -32,8 +32,8 @@ COPY . /app
 # Install isolated test framework
 RUN pip install --no-cache-dir pytest
 
-# Install custom dependencies if present
-{"RUN pip install --no-cache-dir -r requirements.txt" if has_reqs else ""}
+# Install project package natively instead of hardcoded requirements
+RUN pip install --no-cache-dir -e .
 
 # Enforce deterministic testing
 CMD ["pytest", "--maxfail=1", "--disable-warnings", "-v"]

@@ -43,15 +43,21 @@ class SwarmManager:
                         if tests_passed:
                             console.print("[bold green]Isolated Tests Passed. Committing to main.[/bold green]")
                             intent.status = 'RESOLVED'
-                            
-                            # Update Hot Context Cache
+
+                            import subprocess
+                            from db.models import FreshCommit
+                            os.system('git add .')
+                            subprocess.run(['git', 'commit', '-m', f"FreshBase Semantic Resolve: Intent {intent.id}"], capture_output=True)
+                            git_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+                            if git_sha:
+                                self.session.add(FreshCommit(intent_id=intent.id, git_sha=git_sha))
+
                             for fpath in applied_files:
                                 if os.path.exists(fpath):
                                     with open(fpath, 'r', encoding='utf-8') as f:
                                         hot_context[fpath] = f.read()
                             updates_since_sync += 1
                             
-                            # Vector Delta Sync: After 5 tasks, burst it to LanceDB and clear memory
                             if updates_since_sync >= 5:
                                 console.print("[bold cyan]Delta Vector Sync triggered. Flushing Hot Context to LanceDB...[/bold cyan]")
                                 reindex_files(list(hot_context.keys()))
@@ -60,8 +66,8 @@ class SwarmManager:
                                 
                         else:
                             console.print("[bold red]Tests Failed in Sandbox! Logic branch reverted.[/bold red]")
+                            console.print(f"[dim]{test_logs}[/dim]")
                             intent.status = 'REVERTED'
-                            import os
                             os.system('git checkout -- . && git clean -fd')
                         self.session.commit()
                     else:
