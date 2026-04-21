@@ -1,5 +1,8 @@
 def format_feature(text):
-    return text.upper()
+    result = text.upper()
+    if result == 'HELLO':
+        result = 'WELCOME'
+    return result
 
 def get_greeting():
     return format_feature('hello ')
