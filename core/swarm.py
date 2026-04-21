@@ -35,6 +35,18 @@ console = Console()
 _merge_lock = threading.Lock()
 
 
+def _format_files(file_list: list[str], cwd: str = None):
+    """Run black on only the specified files, not the entire repo."""
+    py_files = [f for f in file_list if f.endswith(".py")]
+    if not py_files:
+        return
+    try:
+        cmd = ["black", "--quiet"] + py_files
+        subprocess.run(cmd, capture_output=True, cwd=cwd)
+    except Exception:
+        pass
+
+
 class SwarmManager:
     """
     Orchestrates intent execution with dependency-aware parallel scheduling.
@@ -55,6 +67,22 @@ class SwarmManager:
         """
         session = get_session()
         try:
+            # Recover orphaned intents from crashed prior runs
+            stale = (
+                session.query(Intent)
+                .filter(Intent.status.in_(["IN_PROGRESS", "NEEDS_REVIEW"]))
+                .all()
+            )
+            if stale:
+                console.print(
+                    f"[bold yellow]Recovering {len(stale)} orphaned intent(s) "
+                    f"from a prior crashed run...[/bold yellow]"
+                )
+                for s in stale:
+                    console.print(f"  Intent {s.id} ({s.status}) → reset to PENDING")
+                    s.status = "PENDING"
+                session.commit()
+
             intents = session.query(Intent).filter(Intent.status == "PENDING").all()
             if not intents:
                 console.print(
@@ -62,6 +90,9 @@ class SwarmManager:
                     "Vector Metastore.[/bold yellow]"
                 )
                 return
+
+            # Auto-index if the vector store is empty (Q22)
+            self._ensure_indexed()
 
             if len(intents) == 1:
                 self._execute_single(intents[0], session)
@@ -297,7 +328,7 @@ class SwarmManager:
                                 f"for merge.[/bold green]"
                             )
                             # Commit on the worktree's branch
-                            os.system("black . > /dev/null 2>&1")
+                            _format_files(applied_files, cwd=abs_worktree)
                             subprocess.run(
                                 ["git", "add", "."],
                                 capture_output=True,
@@ -425,7 +456,7 @@ class SwarmManager:
                     success, err = merge_intent_branch(intent.id)
 
                     if success:
-                        os.system("black . > /dev/null 2>&1")
+                        _format_files(result["files"])
                         run_git_command(["add", "."])
                         run_git_command(
                             [
@@ -557,9 +588,47 @@ class SwarmManager:
     #  Helpers
     # ------------------------------------------------------------------ #
 
+    def _ensure_indexed(self):
+        """
+        Check if the vector store has been populated. If empty, auto-trigger
+        indexing so the RAG pipeline and dependency classifier have context.
+        """
+        try:
+            from db.vector_store import get_vector_db
+
+            db = get_vector_db()
+            if "code_chunks" not in db.table_names():
+                console.print(
+                    "[bold yellow]Vector store is empty. Auto-indexing "
+                    "codebase for RAG context...[/bold yellow]"
+                )
+                from core.indexer import index_repo
+
+                count = index_repo()
+                console.print(
+                    f"[bold green]Auto-indexed {count} code chunks "
+                    f"into LanceDB.[/bold green]"
+                )
+            else:
+                table = db.open_table("code_chunks")
+                if len(table) == 0:
+                    console.print(
+                        "[bold yellow]Vector store is empty. Auto-indexing "
+                        "codebase for RAG context...[/bold yellow]"
+                    )
+                    from core.indexer import index_repo
+
+                    count = index_repo()
+                    console.print(
+                        f"[bold green]Auto-indexed {count} code chunks "
+                        f"into LanceDB.[/bold green]"
+                    )
+        except Exception as e:
+            console.print(f"[dim]Auto-index check skipped: {e}[/dim]")
+
     def _commit_intent(self, intent, applied_files, session):
         """Commit a resolved intent directly on main (single-intent path)."""
-        os.system("black . > /dev/null 2>&1")
+        _format_files(applied_files)
         os.system("git add .")
         subprocess.run(
             [

@@ -1,4 +1,5 @@
 import os
+import subprocess
 from sqlalchemy.orm import Session
 from db.engine import get_session
 from db.models import Intent, FreshCommit
@@ -87,14 +88,31 @@ class ResolutionSwarm:
             return f"[RESOLUTION SWARM FAILED]\\nThe AI attempted to fix downstream code but failed verification:\\n{post_logs}"
 
         # 6. Secure the fix locally on the shadow branch
-        os.system('black . > /dev/null 2>&1')
+        if applied_files:
+            py_files = [f for f in applied_files if f.endswith(".py")]
+            if py_files:
+                subprocess.run(["black", "--quiet"] + py_files, capture_output=True)
         run_git_command(["add", "."])
-        run_git_command(["commit", "--no-verify", "-m", f"FreshBase Semantic Resolve: Reverted Intent {target_intent_id} Locally"])
+        run_git_command(
+            [
+                "commit",
+                "--no-verify",
+                "-m",
+                f"FreshBase Semantic Resolve: Reverted Intent {target_intent_id} Locally",
+            ]
+        )
 
         # 7. Merge gracefully back into main and cleanup
         run_git_command(["checkout", "main"])
         run_git_command(["merge", "--squash", shadow_branch])
-        run_git_command(["commit", "--no-verify", "-m", f"FreshBase Swarm Auto-Merge: Intent {target_intent_id} Resolution"])
+        run_git_command(
+            [
+                "commit",
+                "--no-verify",
+                "-m",
+                f"FreshBase Swarm Auto-Merge: Intent {target_intent_id} Resolution",
+            ]
+        )
         run_git_command(["branch", "-D", shadow_branch])
 
         # 8. Mark complete conceptually

@@ -1,9 +1,18 @@
 import os
 import re
+import time
 from litellm import completion
 from db.vector_store import search_code
 from rich.prompt import Prompt
+from rich.console import Console
 from core.config import get_global_model
+
+# Transient HTTP errors that warrant retry
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BASE_BACKOFF_SECONDS = 2
+
+console = Console()
 
 
 class BuilderPod:
@@ -73,51 +82,120 @@ class BuilderPod:
         message_history.append({"role": "user", "content": user_prompt})
 
         while True:
+            raw_response = self._call_llm_with_retry(message_history)
+            if raw_response is None:
+                return "LLM call failed after retries.", []
+
+            if "<PROMPT_DIRECTOR>" in raw_response:
+                if not self.interactive:
+                    # Parallel mode: cannot prompt stdin, defer to human
+                    return raw_response, []
+                # Extract the question and prompt the user
+                question = (
+                    re.search(r"<PROMPT_DIRECTOR>(.*?)</PROMPT_DIRECTOR>", raw_response)
+                    .group(1)
+                    .strip()
+                )
+                user_answer = Prompt.ask(f"PROMPT DIRECTOR Question: {question}")
+                message_history.append({"role": "assistant", "content": raw_response})
+                message_history.append({"role": "user", "content": user_answer})
+            else:
+                applied_files = self._apply_files(raw_response)
+                return raw_response, applied_files
+
+    def _call_llm_with_retry(self, messages: list) -> "str | None":
+        """
+        Calls the LLM with exponential backoff retry for transient errors.
+        Returns the raw response string, or None if all retries fail.
+        """
+        for attempt in range(_MAX_RETRIES):
             try:
-                response = completion(model=self.model_name, messages=message_history)
-                raw_response = response.choices[0].message.content
-                if "<PROMPT_DIRECTOR>" in raw_response:
-                    if not self.interactive:
-                        # Parallel mode: cannot prompt stdin, defer to human
-                        return raw_response, []
-                    # Extract the question and prompt the user
-                    question = (
-                        re.search(
-                            r"<PROMPT_DIRECTOR>(.*?)</PROMPT_DIRECTOR>", raw_response
-                        )
-                        .group(1)
-                        .strip()
-                    )
-                    user_answer = Prompt.ask(f"PROMPT DIRECTOR Question: {question}")
-                    message_history.append(
-                        {"role": "assistant", "content": raw_response}
-                    )
-                    message_history.append({"role": "user", "content": user_answer})
-                else:
-                    applied_files = self._apply_files(raw_response)
-                    return raw_response, applied_files
+                response = completion(model=self.model_name, messages=messages)
+                return response.choices[0].message.content
             except Exception as e:
-                return f"An error occurred: {str(e)}", []
+                error_str = str(e)
+                # Check if the error is retryable (rate limit, server error)
+                is_retryable = any(
+                    str(code) in error_str for code in _RETRYABLE_STATUS_CODES
+                )
+
+                if is_retryable and attempt < _MAX_RETRIES - 1:
+                    wait_time = _BASE_BACKOFF_SECONDS * (2**attempt)
+                    console.print(
+                        f"[bold yellow]Transient API error (attempt "
+                        f"{attempt + 1}/{_MAX_RETRIES}). Retrying in "
+                        f"{wait_time}s...[/bold yellow]"
+                    )
+                    time.sleep(wait_time)
+                else:
+                    console.print(f"[bold red]LLM call failed: {error_str}[/bold red]")
+                    return None
+        return None
 
     def _apply_files(self, agent_output: str) -> list[str]:
         """
         Parses the <FILE> blocks from the agent's output and writes them tracking changes.
+        All paths are validated to resolve within the project root before any write.
+        Existing files are staged in git before overwrite for safe rollback.
         """
         pattern = re.compile(
             r"<FILE>\s*<PATH>(.*?)</PATH>\s*<CODE>(.*?)</CODE>\s*</FILE>", re.DOTALL
         )
         matches = pattern.findall(agent_output)
 
+        project_root = os.path.abspath(os.getcwd())
         applied = []
+
         for path_match, code_match in matches:
             path = path_match.strip()
+
+            # ---- PATH SECURITY SANDBOX ----
+            # Reject absolute paths immediately
+            if os.path.isabs(path):
+                console.print(
+                    f"[bold red]SECURITY BLOCK: Absolute path rejected: "
+                    f"{path}[/bold red]"
+                )
+                continue
+
+            # Reject any path containing traversal components
+            normalized = os.path.normpath(path)
+            if normalized.startswith("..") or "/.." in normalized:
+                console.print(
+                    f"[bold red]SECURITY BLOCK: Path traversal rejected: "
+                    f"{path}[/bold red]"
+                )
+                continue
+
+            # Resolve the full path and verify it's within the project root
+            resolved = os.path.abspath(os.path.join(project_root, normalized))
+            if (
+                not resolved.startswith(project_root + os.sep)
+                and resolved != project_root
+            ):
+                console.print(
+                    f"[bold red]SECURITY BLOCK: Path escapes project root: "
+                    f"{path} → {resolved}[/bold red]"
+                )
+                continue
+            # ---- END PATH SECURITY SANDBOX ----
+
+            # Stage existing file in git before overwrite (Q20 safety net)
+            if os.path.exists(resolved):
+                import subprocess
+
+                subprocess.run(
+                    ["git", "add", resolved],
+                    capture_output=True,
+                )
+
             # Strip a single leading and trailing newline to prevent whitespace drift
             code = code_match.strip("\n")
 
-            # Sandbox directories locally
-            os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+            # Create directories within the project boundary
+            os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
 
-            with open(path, "w", encoding="utf-8") as f:
+            with open(resolved, "w", encoding="utf-8") as f:
                 f.write(code)
             applied.append(path)
 
