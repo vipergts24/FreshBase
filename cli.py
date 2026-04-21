@@ -9,8 +9,10 @@ load_dotenv(dotenv_path=os.path.join(os.getcwd(), '.env'), override=True)
 import typer
 from rich.console import Console
 from rich.prompt import Prompt
+from rich.table import Table
+import subprocess
 from db.engine import init_db, get_session
-from db.models import Intent
+from db.models import Intent, FreshCommit
 from core.indexer import index_repo
 from core.agent import BuilderPod
 from core.sandbox import SandboxManager
@@ -25,8 +27,18 @@ console = Console()
 def init():
     console.print("[bold green]Initializing FreshBase...[/bold green]")
     init_db()
+    
+    # Configure post-commit hook for out-of-band tracking
+    if os.path.exists(".git"):
+        hooks_dir = os.path.join(".git", "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        hook_path = os.path.join(hooks_dir, "post-commit")
+        hook_script = "#!/bin/sh\nfresh sync-commits\n"
+        with open(hook_path, "w") as f:
+            f.write(hook_script)
+        os.chmod(hook_path, 0o755)
+        
     console.print("Successfully initialized semantic tracking in .fresh/")
-
 @app.command()
 def index():
     console.print("[bold blue]Indexing codebase for the Knowledge Engine (Vector DB)...[/bold blue]")
@@ -114,6 +126,74 @@ def config():
     console.print(f"\n[bold green]Success![/bold green] Global model set to [bold white]{model_name}[/bold white].")
     console.print(f"Please ensure you add the following to your [bold yellow].env[/bold yellow] file in your project root:")
     console.print(f"[bold cyan]{key_name}=\"your-api-key-here\"[/bold cyan]")
+
+@app.command()
+def log(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full descriptions without truncation")):
+    console.print("[bold cyan]--- Swarm Intent History ---[/bold cyan]")
+    session = get_session()
+    
+    intents = session.query(Intent).order_by(Intent.id.desc()).all()
+    if not intents:
+        console.print("[bold yellow]No intents found in the local FreshBase database.[/bold yellow]")
+        return
+        
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("ID", style="dim", width=4)
+    table.add_column("Status", width=12)
+    table.add_column("Target SHA", width=10)
+    table.add_column("Description")
+    
+    for intent in intents:
+        # Determine color for status
+        status_color = "white"
+        if intent.status == "PENDING":
+            status_color = "yellow"
+        elif intent.status == "RESOLVED":
+            status_color = "green"
+        elif intent.status == "REVERTED":
+            status_color = "red"
+            
+        status_str = f"[{status_color}]{intent.status}[/{status_color}]"
+        
+        # Git SHA mapping
+        sha_str = "None"
+        if intent.commits:
+            sha_str = intent.commits[0].git_sha[:7]
+            
+        # Truncate description if extremely long and not verbose
+        desc = intent.description
+        if not verbose and len(desc) > 60:
+            desc = desc[:57] + "..."
+            
+        table.add_row(str(intent.id), status_str, sha_str, desc)
+        
+    console.print(table)
+
+@app.command(hidden=True)
+def sync_commits():
+    """Silently parses manual commits and injects them into the Intent Swarm DB."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        msg = subprocess.run(["git", "log", "-1", "--pretty=%B"], capture_output=True, text=True).stdout.strip()
+        
+        # Don't recurse if the swarm built it natively
+        if "FreshBase Semantic Resolve: Intent" in msg[:100]:
+            return
+            
+        session = get_session()
+        # Verify it doesn't exist
+        existing = session.query(FreshCommit).filter_by(git_sha=sha).first()
+        if not existing:
+            # It's an out-of-band commit!
+            intent = Intent(description=f"Manual Commit: {msg[:200]}", status="RESOLVED")
+            session.add(intent)
+            session.commit()
+            
+            f_commit = FreshCommit(intent_id=intent.id, git_sha=sha)
+            session.add(f_commit)
+            session.commit()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     app()
