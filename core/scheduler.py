@@ -23,7 +23,7 @@ class IntentScheduler:
     Different groups can safely execute in parallel.
     """
 
-    def classify(self, intents) -> list[list]:
+    def classify(self, intents, tracker=None) -> list[list]:
         """
         Takes a list of Intent ORM objects and returns execution groups.
 
@@ -39,7 +39,7 @@ class IntentScheduler:
         ambiguous_intents = []
 
         for intent in intents:
-            file_hits = self._get_relevant_files(intent.description)
+            file_hits = self._get_relevant_files(intent.description, tracker)
             if file_hits:
                 intent_files[intent.id] = file_hits
             else:
@@ -48,7 +48,7 @@ class IntentScheduler:
         # Tier 2: LLM classification for ambiguous intents
         if ambiguous_intents and intent_files:
             llm_classifications = self._llm_classify(
-                ambiguous_intents, intents, intent_files
+                ambiguous_intents, intents, intent_files, tracker
             )
             for intent_id, files in llm_classifications.items():
                 intent_files[intent_id] = files
@@ -66,7 +66,7 @@ class IntentScheduler:
 
         return groups
 
-    def _get_relevant_files(self, description: str) -> set[str]:
+    def _get_relevant_files(self, description: str, tracker=None) -> set[str]:
         """
         Query the vector store to find which files are semantically
         related to this intent description. Returns a set of file paths.
@@ -77,9 +77,18 @@ class IntentScheduler:
             path = result.get("file_path", "")
             if path:
                 file_paths.add(path)
+
+        # Track embedding API usage
+        if tracker:
+            # Estimate ~15 tokens per intent description for ada-002
+            est_tokens = max(len(description.split()) * 2, 15)
+            tracker.record_embedding("text-embedding-ada-002", est_tokens)
+
         return file_paths
 
-    def _llm_classify(self, ambiguous, all_intents, known_files) -> dict[int, set[str]]:
+    def _llm_classify(
+        self, ambiguous, all_intents, known_files, tracker=None
+    ) -> dict[int, set[str]]:
         """
         For intents where the vector store returned no file matches,
         ask the LLM to predict which files they will likely modify.
@@ -113,6 +122,10 @@ class IntentScheduler:
                 max_tokens=200,
             )
             raw = response.choices[0].message.content
+
+            # Track LLM usage for classification
+            if tracker:
+                tracker.record_llm(model, response)
 
             classifications = {}
             for line in raw.strip().split("\n"):

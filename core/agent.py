@@ -22,10 +22,11 @@ class BuilderPod:
     its own output to write files directly.
     """
 
-    def __init__(self, override_model=None, interactive=True):
+    def __init__(self, override_model=None, interactive=True, tracker=None):
         base_model = override_model or get_global_model()
         self.model_name = os.environ.get("FRESH_MODEL", base_model)
         self.interactive = interactive
+        self.tracker = tracker
 
     def execute_intent(
         self, intent: str, hot_context: dict = None
@@ -81,6 +82,35 @@ class BuilderPod:
         message_history = [{"role": "system", "content": system_prompt}]
         message_history.append({"role": "user", "content": user_prompt})
 
+        # Intent size guardrail: estimate tokens before calling the LLM
+        if self.tracker:
+            tier, token_count = self.tracker.check_intent_budget(
+                self.model_name, message_history
+            )
+            if tier == "red":
+                console.print(
+                    f"[bold red]BUDGET BLOCK: This intent would consume "
+                    f"~{token_count:,} tokens. That's too large for a "
+                    f"single agent pass. Break it into smaller "
+                    f"intents.[/bold red]"
+                )
+                return "Intent blocked: exceeds 50K token budget.", []
+            elif tier == "orange":
+                console.print(
+                    f"[bold yellow]WARNING: This intent will consume "
+                    f"~{token_count:,} tokens (~${token_count * 0.0000025:.4f} "
+                    f"input cost).[/bold yellow]"
+                )
+                if self.interactive:
+                    from rich.prompt import Confirm
+
+                    if not Confirm.ask("Continue with this large intent?"):
+                        return "Intent cancelled by user.", []
+            elif tier == "yellow":
+                console.print(
+                    f"[dim]Note: Large intent (~{token_count:,} tokens)[/dim]"
+                )
+
         while True:
             raw_response = self._call_llm_with_retry(message_history)
             if raw_response is None:
@@ -111,6 +141,9 @@ class BuilderPod:
         for attempt in range(_MAX_RETRIES):
             try:
                 response = completion(model=self.model_name, messages=messages)
+                # Record usage in the tracker
+                if self.tracker:
+                    self.tracker.record_llm(self.model_name, response)
                 return response.choices[0].message.content
             except Exception as e:
                 error_str = str(e)

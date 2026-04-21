@@ -19,6 +19,8 @@ from core.agent import BuilderPod
 from core.sandbox import SandboxManager
 from core.scheduler import IntentScheduler
 from core.indexer import reindex_files
+from core.token_tracker import TokenTracker
+from core.config import get_max_intents
 from core.git_utils import (
     run_git_command,
     merge_intent_branch,
@@ -59,6 +61,8 @@ class SwarmManager:
         self.updates_since_sync = 0
         # Buffer for completed branch results awaiting merge
         self._completed = {}
+        # Session-wide token tracker
+        self.tracker = TokenTracker()
 
     def process_intents(self):
         """
@@ -94,6 +98,23 @@ class SwarmManager:
             # Auto-index if the vector store is empty (Q22)
             self._ensure_indexed()
 
+            # Set total intent count for progress tracking
+            self.tracker.total_intents = len(intents)
+
+            # Budget guardrail: confirm if exceeding configurable threshold
+            max_intents = get_max_intents()
+            if len(intents) > max_intents:
+                from rich.prompt import Confirm
+
+                console.print(
+                    f"[bold yellow]You are about to process {len(intents)} "
+                    f"intents (threshold: {max_intents}). This may consume "
+                    f"significant API tokens.[/bold yellow]"
+                )
+                if not Confirm.ask("Continue?"):
+                    console.print("[dim]Swarm cancelled by user.[/dim]")
+                    return
+
             if len(intents) == 1:
                 self._execute_single(intents[0], session)
             else:
@@ -114,6 +135,10 @@ class SwarmManager:
         except Exception as e:
             console.print(f"[bold red]Critical Swarm Query Error:[/bold red] {str(e)}")
         finally:
+            # Display session summary and persist
+            console.print(self.tracker.render_summary())
+            self.tracker.flush_to_db()
+
             self._recover_git_state()
             # Prune orphaned sandbox images
             try:
@@ -147,7 +172,7 @@ class SwarmManager:
             intent.status = "IN_PROGRESS"
             session.commit()
 
-            builder = BuilderPod(interactive=True)
+            builder = BuilderPod(interactive=True, tracker=self.tracker)
             response, applied_files = builder.execute_intent(
                 intent.description, hot_context=self.hot_context
             )
@@ -160,6 +185,7 @@ class SwarmManager:
                 )
                 sandbox = SandboxManager()
                 tests_passed, test_logs = sandbox.execute_tests()
+                self.tracker.record_resource("docker")
 
                 # Record the Run for audit trail
                 run = Run(
@@ -176,6 +202,8 @@ class SwarmManager:
                         "Committing to main.[/bold green]"
                     )
                     self._commit_intent(intent, applied_files, session)
+                    self.tracker.record_intent_result(resolved=True)
+                    console.print(self.tracker.render_status_bar())
                 else:
                     console.print(
                         "[bold red]Tests Failed in Sandbox! "
@@ -183,6 +211,7 @@ class SwarmManager:
                     )
                     console.print(f"[dim]{test_logs}[/dim]")
                     intent.status = "REVERTED"
+                    self.tracker.record_intent_result(resolved=False)
                     os.system("git checkout -- . && git clean -fd")
                 session.commit()
             else:
@@ -208,7 +237,7 @@ class SwarmManager:
         Classify intents into dependency groups, execute groups in parallel
         using git worktrees, then merge all results via the Ordered Gate.
         """
-        groups = self.scheduler.classify(intents)
+        groups = self.scheduler.classify(intents, tracker=self.tracker)
 
         console.print(
             f"\n[bold magenta]Launching parallel execution across "
@@ -275,8 +304,13 @@ class SwarmManager:
                 abs_worktree = os.path.abspath(worktree_path)
 
                 # Execute the BuilderPod targeting the worktree directory
-                builder = BuilderPod(interactive=False)
+                builder = BuilderPod(interactive=False, tracker=self.tracker)
                 merged_context = {**self.hot_context, **group_hot_context}
+
+                # Trim hot context to fit within model's context window (Q24)
+                merged_context = self.tracker.trim_hot_context(
+                    merged_context, builder.model_name
+                )
 
                 # Save CWD and switch to worktree for file writes
                 original_cwd = os.getcwd()

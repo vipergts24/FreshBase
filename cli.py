@@ -285,5 +285,97 @@ def sync_commits():
         pass
 
 
+@app.command()
+def usage(
+    show_all: bool = typer.Option(False, "--all", help="Show all sessions"),
+    session_id: str = typer.Option(None, "--session", help="Drill into a session"),
+):
+    """Display historical token usage and cost tracking."""
+    from db.models import TokenUsage
+
+    db_session = get_session()
+
+    if session_id:
+        # Show detail for a specific session
+        record = (
+            db_session.query(TokenUsage)
+            .filter(TokenUsage.session_id == session_id)
+            .first()
+        )
+        if not record:
+            console.print(f"[bold red]Session '{session_id}' not found.[/bold red]")
+            return
+
+        table = Table(title=f"Session: {record.session_id}")
+        table.add_column("Metric", style="white")
+        table.add_column("Value", justify="right", style="cyan")
+
+        table.add_row("Model", record.model or "unknown")
+        table.add_row("Prompt Tokens", f"{record.prompt_tokens:,}")
+        table.add_row("Completion Tokens", f"{record.completion_tokens:,}")
+        table.add_row("Embedding Tokens", f"{record.embedding_tokens:,}")
+        table.add_row("LLM Calls", str(record.llm_calls))
+        table.add_row("Embedding Calls", str(record.embedding_calls))
+        table.add_row("Docker Builds", str(record.docker_builds))
+        table.add_row("Intents Processed", str(record.intents_processed))
+        table.add_row("Intents Resolved", str(record.intents_resolved))
+        table.add_row("Intents Reverted", str(record.intents_reverted))
+        table.add_row(
+            "Estimated Cost",
+            f"[bold green]${record.estimated_cost:.4f}[/bold green]",
+        )
+        table.add_row("Date", str(record.created_at))
+
+        console.print(table)
+    else:
+        # Show session list
+        limit = None if show_all else 10
+        query = db_session.query(TokenUsage).order_by(TokenUsage.created_at.desc())
+        if limit:
+            query = query.limit(limit)
+        records = query.all()
+
+        if not records:
+            console.print(
+                "[bold yellow]No usage data found. Run `fresh swarm` first.[/bold yellow]"
+            )
+            return
+
+        table = Table(title="FreshBase Usage History")
+        table.add_column("Session", style="cyan")
+        table.add_column("Date", style="white")
+        table.add_column("Model", style="dim")
+        table.add_column("Intents", justify="right")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Cost", justify="right", style="green")
+
+        total_cost = 0.0
+        total_intents = 0
+
+        for r in records:
+            total_tokens = r.prompt_tokens + r.completion_tokens + r.embedding_tokens
+            intents_str = f"{r.intents_resolved}/{r.intents_processed}"
+            date_str = r.created_at.strftime("%b %d, %H:%M") if r.created_at else "N/A"
+
+            table.add_row(
+                r.session_id,
+                date_str,
+                r.model or "unknown",
+                intents_str,
+                f"{total_tokens:,}",
+                f"${r.estimated_cost:.4f}",
+            )
+            total_cost += r.estimated_cost
+            total_intents += r.intents_processed
+
+        console.print(table)
+        console.print(
+            f"\n[bold]Lifetime Total:[/bold] {len(records)} session(s), "
+            f"{total_intents} intents, [bold green]${total_cost:.4f}[/bold green]"
+        )
+
+    db_session.close()
+
+
 if __name__ == "__main__":
     app()

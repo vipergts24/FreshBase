@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, Float, ForeignKey, DateTime
 from sqlalchemy.orm import declarative_base, relationship
 import datetime
 
@@ -57,3 +57,27 @@ class Run(Base):
     logs = Column(String)  # Raw stdout/stderr from pytest
 
     intent = relationship("Intent", back_populates="runs")
+
+
+class TokenUsage(Base):
+    """
+    Persists session-level token usage and cost for historical tracking.
+    Each fresh swarm invocation creates a new session.
+    """
+
+    __tablename__ = "token_usage"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String, index=True)
+    model = Column(String)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    embedding_tokens = Column(Integer, default=0)
+    estimated_cost = Column(Float, default=0.0)
+    llm_calls = Column(Integer, default=0)
+    embedding_calls = Column(Integer, default=0)
+    docker_builds = Column(Integer, default=0)
+    intents_processed = Column(Integer, default=0)
+    intents_resolved = Column(Integer, default=0)
+    intents_reverted = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
