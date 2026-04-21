@@ -5,3 +5,4 @@ venv/
 .env
 .private/
 .pytest_cache/
+.fresh_worktrees/

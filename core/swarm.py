@@ -3,18 +3,17 @@ SwarmManager: Asynchronous Dependency-Aware Orchestration Engine.
 
 For 1 intent: runs directly on main (zero overhead).
 For 2+ intents: classifies dependencies via IntentScheduler, executes
-independent groups in parallel on isolated git branches, and merges
+independent groups in parallel on isolated git worktrees, and merges
 results back to main via the Ordered Gate.
 """
 
 import os
+import shutil
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
-from db.models import Intent, FreshCommit
+from db.models import Intent, FreshCommit, Run
 from db.engine import get_session
 from core.agent import BuilderPod
 from core.sandbox import SandboxManager
@@ -22,27 +21,27 @@ from core.scheduler import IntentScheduler
 from core.indexer import reindex_files
 from core.git_utils import (
     run_git_command,
-    create_intent_branch,
     merge_intent_branch,
     delete_branch,
+    add_worktree,
+    remove_worktree,
+    prune_worktrees,
 )
 from rich.console import Console
 
 console = Console()
 
-# Thread lock for git operations and shared state
-_git_lock = threading.Lock()
+# Thread lock for merge gate (serialized merges only)
 _merge_lock = threading.Lock()
 
 
 class SwarmManager:
     """
     Orchestrates intent execution with dependency-aware parallel scheduling.
+    Uses git worktrees for true filesystem isolation between parallel agents.
     """
 
     def __init__(self):
-        self.session = get_session()
-        self.sandbox = SandboxManager()
         self.scheduler = IntentScheduler()
         self.hot_context = {}
         self.updates_since_sync = 0
@@ -54,10 +53,9 @@ class SwarmManager:
         Main entry point. Queries pending intents, classifies them,
         and dispatches execution groups in parallel.
         """
+        session = get_session()
         try:
-            intents = (
-                self.session.query(Intent).filter(Intent.status == "PENDING").all()
-            )
+            intents = session.query(Intent).filter(Intent.status == "PENDING").all()
             if not intents:
                 console.print(
                     "[bold yellow]No PENDING intents found in the "
@@ -66,11 +64,12 @@ class SwarmManager:
                 return
 
             if len(intents) == 1:
-                # Single intent fast-path: execute directly on main
-                self._execute_single(intents[0])
+                self._execute_single(intents[0], session)
             else:
-                # Multi-intent: classify → parallelize → Ordered Gate merge
-                self._execute_parallel(intents)
+                self._execute_parallel(intents, session)
+
+            # Process any NEEDS_REVIEW intents interactively
+            self._process_deferred(session)
 
             # Final vector sync
             if self.hot_context:
@@ -84,7 +83,8 @@ class SwarmManager:
         except Exception as e:
             console.print(f"[bold red]Critical Swarm Query Error:[/bold red] {str(e)}")
         finally:
-            # Prune orphaned sandbox images to prevent zombie disk bloat
+            self._recover_git_state()
+            # Prune orphaned sandbox images
             try:
                 subprocess.run(
                     [
@@ -99,13 +99,13 @@ class SwarmManager:
                 )
             except Exception:
                 pass
-            self.session.close()
+            session.close()
 
     # ------------------------------------------------------------------ #
     #  Single Intent Path (direct on main, no branching)
     # ------------------------------------------------------------------ #
 
-    def _execute_single(self, intent):
+    def _execute_single(self, intent, session):
         """Execute a single intent directly on main with no branching overhead."""
         console.print(
             f"\n[bold magenta]--- Processing Intent {intent.id} ---[/bold magenta]"
@@ -114,9 +114,9 @@ class SwarmManager:
 
         try:
             intent.status = "IN_PROGRESS"
-            self.session.commit()
+            session.commit()
 
-            builder = BuilderPod()
+            builder = BuilderPod(interactive=True)
             response, applied_files = builder.execute_intent(
                 intent.description, hot_context=self.hot_context
             )
@@ -127,14 +127,24 @@ class SwarmManager:
                     f"\n[bold cyan]Agent applied {len(applied_files)} patches. "
                     f"Initiating Sandbox verification...[/bold cyan]"
                 )
-                tests_passed, test_logs = self.sandbox.execute_tests()
+                sandbox = SandboxManager()
+                tests_passed, test_logs = sandbox.execute_tests()
+
+                # Record the Run for audit trail
+                run = Run(
+                    intent_id=intent.id,
+                    branch_name="main",
+                    tests_passed=tests_passed,
+                    logs=test_logs[:5000],
+                )
+                session.add(run)
 
                 if tests_passed:
                     console.print(
                         "[bold green]Isolated Tests Passed. "
                         "Committing to main.[/bold green]"
                     )
-                    self._commit_intent(intent, applied_files)
+                    self._commit_intent(intent, applied_files, session)
                 else:
                     console.print(
                         "[bold red]Tests Failed in Sandbox! "
@@ -143,29 +153,29 @@ class SwarmManager:
                     console.print(f"[dim]{test_logs}[/dim]")
                     intent.status = "REVERTED"
                     os.system("git checkout -- . && git clean -fd")
-                self.session.commit()
+                session.commit()
             else:
                 console.print(
                     "[bold yellow]No code files generated. "
                     "Intent resolved as discussion/clarification.[/bold yellow]"
                 )
                 intent.status = "RESOLVED"
-                self.session.commit()
+                session.commit()
         except Exception as e:
             console.print(
                 f"[bold red]Exception during orchestration of "
                 f"intent {intent.id}:[/bold red] {str(e)}"
             )
-            self.session.rollback()
+            session.rollback()
 
     # ------------------------------------------------------------------ #
     #  Multi-Intent Parallel Path
     # ------------------------------------------------------------------ #
 
-    def _execute_parallel(self, intents):
+    def _execute_parallel(self, intents, session):
         """
-        Classify intents into dependency groups, execute groups in parallel,
-        then merge all results via the Ordered Gate.
+        Classify intents into dependency groups, execute groups in parallel
+        using git worktrees, then merge all results via the Ordered Gate.
         """
         groups = self.scheduler.classify(intents)
 
@@ -174,7 +184,10 @@ class SwarmManager:
             f"{len(groups)} group(s)...[/bold magenta]"
         )
 
-        # Each group runs as a thread. Within a group, intents run sequentially.
+        # Ensure clean worktree directory
+        os.makedirs(".fresh_worktrees", exist_ok=True)
+
+        # Each group runs as a thread with its own session and worktrees
         with ThreadPoolExecutor(max_workers=len(groups)) as executor:
             futures = {}
             for group in groups:
@@ -193,144 +206,205 @@ class SwarmManager:
                     )
 
         # Ordered Gate: merge all completed branches in original queue order
-        self._ordered_gate_merge(intents)
+        self._ordered_gate_merge(intents, session)
 
     def _execute_group(self, group):
         """
-        Execute a sequential chain of intents on isolated branches.
-        Each intent in the group gets its own branch for sandbox isolation.
+        Execute a sequential chain of intents on isolated worktrees.
+        Each thread gets its own SQLAlchemy session.
         """
+        thread_session = get_session()
         group_hot_context = {}
 
         for intent in group:
+            # Re-fetch the intent in this thread's session
+            local_intent = thread_session.query(Intent).get(intent.id)
+
             console.print(
                 f"\n[bold magenta]--- Background Agent processing "
-                f"Intent {intent.id} ---[/bold magenta]"
+                f"Intent {local_intent.id} ---[/bold magenta]"
             )
-            console.print(f"[white]Goal:[/white] {intent.description}")
+            console.print(f"[white]Goal:[/white] {local_intent.description}")
 
             try:
-                # Update status
-                with _git_lock:
-                    intent.status = "IN_PROGRESS"
-                    self.session.commit()
+                local_intent.status = "IN_PROGRESS"
+                thread_session.commit()
 
-                # Create an isolated branch for this intent
-                with _git_lock:
-                    branch = create_intent_branch(intent.id)
-                    if not branch:
-                        console.print(
-                            f"[bold red]Failed to create branch for "
-                            f"intent {intent.id}[/bold red]"
-                        )
-                        intent.status = "REVERTED"
-                        self.session.commit()
-                        continue
-                    run_git_command(["checkout", branch])
-
-                # Execute the BuilderPod on the isolated branch
-                builder = BuilderPod()
-                merged_context = {**self.hot_context, **group_hot_context}
-                response, applied_files = builder.execute_intent(
-                    intent.description, hot_context=merged_context
-                )
-                console.print(f"\n[dim]Raw BuilderPod Trace Output:[/dim]\n{response}")
-
-                if applied_files:
+                # Create an isolated worktree for this intent
+                worktree_path = add_worktree(local_intent.id)
+                if not worktree_path:
                     console.print(
-                        f"\n[bold cyan]Agent applied {len(applied_files)} "
-                        f"patches. Initiating Sandbox verification...[/bold cyan]"
+                        f"[bold red]Failed to create worktree for "
+                        f"intent {local_intent.id}[/bold red]"
                     )
-                    sandbox = SandboxManager()
-                    tests_passed, test_logs = sandbox.execute_tests()
+                    local_intent.status = "REVERTED"
+                    thread_session.commit()
+                    continue
 
-                    if tests_passed:
+                abs_worktree = os.path.abspath(worktree_path)
+
+                # Execute the BuilderPod targeting the worktree directory
+                builder = BuilderPod(interactive=False)
+                merged_context = {**self.hot_context, **group_hot_context}
+
+                # Save CWD and switch to worktree for file writes
+                original_cwd = os.getcwd()
+                os.chdir(abs_worktree)
+
+                try:
+                    response, applied_files = builder.execute_intent(
+                        local_intent.description, hot_context=merged_context
+                    )
+                    console.print(
+                        f"\n[dim]Raw BuilderPod Trace Output:[/dim]\n{response}"
+                    )
+
+                    if applied_files:
+                        # Check if this was a PROMPT_DIRECTOR deferral
+                        if not applied_files and "<PROMPT_DIRECTOR>" in response:
+                            local_intent.status = "NEEDS_REVIEW"
+                            thread_session.commit()
+                            self._completed[local_intent.id] = {
+                                "branch": f"fresh/intent-{local_intent.id}",
+                                "files": [],
+                                "status": "DEFERRED",
+                            }
+                            continue
+
                         console.print(
-                            f"[bold green]Intent {intent.id}: Isolated Tests "
-                            f"Passed. Branch ready for merge.[/bold green]"
+                            f"\n[bold cyan]Agent applied {len(applied_files)} "
+                            f"patches. Initiating Sandbox verification..."
+                            f"[/bold cyan]"
                         )
-                        # Commit on the feature branch
-                        os.system("black . > /dev/null 2>&1")
-                        with _git_lock:
-                            run_git_command(["add", "."])
-                            run_git_command(
+                        # Sandbox tests from the worktree directory
+                        sandbox = SandboxManager(root_dir=abs_worktree)
+                        tests_passed, test_logs = sandbox.execute_tests()
+
+                        # Record the Run
+                        run = Run(
+                            intent_id=local_intent.id,
+                            branch_name=f"fresh/intent-{local_intent.id}",
+                            tests_passed=tests_passed,
+                            logs=test_logs[:5000],
+                        )
+                        thread_session.add(run)
+                        thread_session.commit()
+
+                        if tests_passed:
+                            console.print(
+                                f"[bold green]Intent {local_intent.id}: "
+                                f"Isolated Tests Passed. Branch ready "
+                                f"for merge.[/bold green]"
+                            )
+                            # Commit on the worktree's branch
+                            os.system("black . > /dev/null 2>&1")
+                            subprocess.run(
+                                ["git", "add", "."],
+                                capture_output=True,
+                                cwd=abs_worktree,
+                            )
+                            subprocess.run(
                                 [
+                                    "git",
                                     "commit",
                                     "--no-verify",
                                     "-m",
-                                    f"FreshBase Semantic Resolve: Intent {intent.id}",
-                                ]
+                                    f"FreshBase Semantic Resolve: "
+                                    f"Intent {local_intent.id}",
+                                ],
+                                capture_output=True,
+                                cwd=abs_worktree,
                             )
 
-                        # Track files for hot context within this group
-                        for fpath in applied_files:
-                            if os.path.exists(fpath):
-                                with open(fpath, "r", encoding="utf-8") as f:
-                                    group_hot_context[fpath] = f.read()
+                            # Track files for hot context within group
+                            for fpath in applied_files:
+                                full = os.path.join(abs_worktree, fpath)
+                                if os.path.exists(full):
+                                    with open(full, "r", encoding="utf-8") as f:
+                                        group_hot_context[fpath] = f.read()
 
-                        # Mark as ready for the Ordered Gate
-                        self._completed[intent.id] = {
-                            "branch": branch,
-                            "files": applied_files,
-                            "status": "PASSED",
-                        }
+                            self._completed[local_intent.id] = {
+                                "branch": f"fresh/intent-{local_intent.id}",
+                                "files": applied_files,
+                                "status": "PASSED",
+                            }
+                        else:
+                            console.print(
+                                f"[bold red]Intent {local_intent.id}: "
+                                f"Tests Failed in Sandbox![/bold red]"
+                            )
+                            console.print(f"[dim]{test_logs}[/dim]")
+                            self._completed[local_intent.id] = {
+                                "branch": f"fresh/intent-{local_intent.id}",
+                                "files": [],
+                                "status": "FAILED",
+                            }
                     else:
-                        console.print(
-                            f"[bold red]Intent {intent.id}: Tests Failed "
-                            f"in Sandbox! Branch discarded.[/bold red]"
-                        )
-                        console.print(f"[dim]{test_logs}[/dim]")
-                        self._completed[intent.id] = {
-                            "branch": branch,
-                            "files": [],
-                            "status": "FAILED",
-                        }
-                else:
-                    console.print(
-                        f"[bold yellow]Intent {intent.id}: No code files "
-                        f"generated.[/bold yellow]"
-                    )
-                    self._completed[intent.id] = {
-                        "branch": branch,
-                        "files": [],
-                        "status": "NO_OUTPUT",
-                    }
+                        # Check for PROMPT_DIRECTOR deferral
+                        if "<PROMPT_DIRECTOR>" in response:
+                            console.print(
+                                f"[bold yellow]Intent {local_intent.id}: "
+                                f"Requires human review. Deferred.[/bold yellow]"
+                            )
+                            local_intent.status = "NEEDS_REVIEW"
+                            thread_session.commit()
+                            self._completed[local_intent.id] = {
+                                "branch": f"fresh/intent-{local_intent.id}",
+                                "files": [],
+                                "status": "DEFERRED",
+                            }
+                        else:
+                            console.print(
+                                f"[bold yellow]Intent {local_intent.id}: "
+                                f"No code files generated.[/bold yellow]"
+                            )
+                            self._completed[local_intent.id] = {
+                                "branch": f"fresh/intent-{local_intent.id}",
+                                "files": [],
+                                "status": "NO_OUTPUT",
+                            }
 
-                # Return to main before the next intent in the chain
-                with _git_lock:
-                    run_git_command(["checkout", "main"])
+                finally:
+                    os.chdir(original_cwd)
+
+                # Clean up the worktree (branch is preserved for merge)
+                remove_worktree(local_intent.id)
 
             except Exception as e:
                 console.print(
-                    f"[bold red]Exception during intent {intent.id}: "
+                    f"[bold red]Exception during intent {local_intent.id}: "
                     f"{str(e)}[/bold red]"
                 )
-                with _git_lock:
-                    run_git_command(["checkout", "main"])
-                self._completed[intent.id] = {
-                    "branch": f"fresh/intent-{intent.id}",
+                # Ensure we're back in the original directory
+                try:
+                    os.chdir(original_cwd)
+                except Exception:
+                    pass
+                remove_worktree(local_intent.id)
+                self._completed[local_intent.id] = {
+                    "branch": f"fresh/intent-{local_intent.id}",
                     "files": [],
                     "status": "ERROR",
                 }
+
+        thread_session.close()
 
     # ------------------------------------------------------------------ #
     #  Ordered Gate: Sequential Merge in Queue Order
     # ------------------------------------------------------------------ #
 
-    def _ordered_gate_merge(self, intents):
+    def _ordered_gate_merge(self, intents, session):
         """
         Merge completed branches into main strictly in original queue order.
-        This preserves intent ordering regardless of which agent finished first.
         """
         console.print(
             "\n[bold cyan]--- Ordered Gate: Merging branches into "
             "main ---[/bold cyan]"
         )
 
-        with _git_lock:
-            run_git_command(["checkout", "main"])
-
         for intent in intents:
+            # Re-fetch in the main session
+            local_intent = session.query(Intent).get(intent.id)
             result = self._completed.get(intent.id)
 
             if not result:
@@ -343,7 +417,8 @@ class SwarmManager:
 
             if result["status"] == "PASSED":
                 console.print(
-                    f"[bold cyan]Merging Intent {intent.id} into main...[/bold cyan]"
+                    f"[bold cyan]Merging Intent {intent.id} "
+                    f"into main...[/bold cyan]"
                 )
 
                 with _merge_lock:
@@ -361,7 +436,6 @@ class SwarmManager:
                             ]
                         )
 
-                        # Record the commit SHA
                         git_sha = subprocess.run(
                             ["git", "rev-parse", "HEAD"],
                             capture_output=True,
@@ -369,11 +443,11 @@ class SwarmManager:
                         ).stdout.strip()
 
                         if git_sha:
-                            self.session.add(
+                            session.add(
                                 FreshCommit(intent_id=intent.id, git_sha=git_sha)
                             )
 
-                        intent.status = "RESOLVED"
+                        local_intent.status = "RESOLVED"
 
                         # Update hot context
                         for fpath in result["files"]:
@@ -384,58 +458,106 @@ class SwarmManager:
 
                         if self.updates_since_sync >= 5:
                             console.print(
-                                "[bold cyan]Delta Vector Sync triggered. "
-                                "Flushing Hot Context to LanceDB...[/bold cyan]"
+                                "[bold cyan]Delta Vector Sync triggered.[/bold cyan]"
                             )
                             reindex_files(list(self.hot_context.keys()))
                             self.hot_context.clear()
                             self.updates_since_sync = 0
 
                         console.print(
-                            f"[bold green]Intent {intent.id}: Successfully "
-                            f"merged into main.[/bold green]"
+                            f"[bold green]Intent {intent.id}: "
+                            f"Successfully merged into main.[/bold green]"
                         )
                     else:
                         console.print(
-                            f"[bold red]Intent {intent.id}: Merge conflict "
-                            f"detected. Attempting semantic resolution..."
-                            f"[/bold red]"
+                            f"[bold red]Intent {intent.id}: Merge conflict. "
+                            f"Marked as reverted.[/bold red]"
                         )
-                        # Abort the failed merge state
                         run_git_command(["reset", "--hard", "HEAD"])
-                        intent.status = "REVERTED"
+                        local_intent.status = "REVERTED"
 
             elif result["status"] == "FAILED":
-                intent.status = "REVERTED"
+                local_intent.status = "REVERTED"
                 console.print(
-                    f"[dim]Intent {intent.id}: Sandbox failed, "
-                    f"skipping merge.[/dim]"
+                    f"[dim]Intent {intent.id}: Sandbox failed, skipping.[/dim]"
                 )
 
             elif result["status"] == "NO_OUTPUT":
-                intent.status = "RESOLVED"
+                local_intent.status = "RESOLVED"
                 console.print(
                     f"[dim]Intent {intent.id}: No output, "
                     f"resolved as discussion.[/dim]"
                 )
 
-            elif result["status"] == "ERROR":
-                intent.status = "REVERTED"
+            elif result["status"] == "DEFERRED":
                 console.print(
-                    f"[dim]Intent {intent.id}: Execution error, "
-                    f"marked reverted.[/dim]"
+                    f"[dim]Intent {intent.id}: Deferred for "
+                    f"interactive review.[/dim]"
                 )
 
-            self.session.commit()
+            elif result["status"] == "ERROR":
+                local_intent.status = "REVERTED"
+                console.print(f"[dim]Intent {intent.id}: Execution error.[/dim]")
 
-            # Cleanup the feature branch
-            delete_branch(branch)
+            session.commit()
+
+            # Cleanup the feature branch (skip deferred — they re-run later)
+            if result["status"] != "DEFERRED":
+                delete_branch(branch)
+
+    # ------------------------------------------------------------------ #
+    #  Deferred NEEDS_REVIEW Processing
+    # ------------------------------------------------------------------ #
+
+    def _process_deferred(self, session):
+        """
+        After parallel execution, process any NEEDS_REVIEW intents
+        interactively in single-intent mode.
+        """
+        deferred = (
+            session.query(Intent)
+            .filter(Intent.status == "NEEDS_REVIEW")
+            .order_by(Intent.id)
+            .all()
+        )
+        if not deferred:
+            return
+
+        console.print(
+            f"\n[bold yellow]--- {len(deferred)} intent(s) require "
+            f"interactive review ---[/bold yellow]"
+        )
+
+        for intent in deferred:
+            intent.status = "PENDING"
+            session.commit()
+            self._execute_single(intent, session)
+
+    # ------------------------------------------------------------------ #
+    #  Crash Recovery
+    # ------------------------------------------------------------------ #
+
+    def _recover_git_state(self):
+        """
+        Ensure the repo is on main in a clean state, regardless of
+        what happened during execution. Called in the finally block.
+        """
+        try:
+            run_git_command(["checkout", "main"])
+            run_git_command(["reset", "--hard", "HEAD"])
+            run_git_command(["clean", "-fd"])
+            prune_worktrees()
+
+            if os.path.exists(".fresh_worktrees"):
+                shutil.rmtree(".fresh_worktrees", ignore_errors=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     #  Helpers
     # ------------------------------------------------------------------ #
 
-    def _commit_intent(self, intent, applied_files):
+    def _commit_intent(self, intent, applied_files, session):
         """Commit a resolved intent directly on main (single-intent path)."""
         os.system("black . > /dev/null 2>&1")
         os.system("git add .")
@@ -456,7 +578,7 @@ class SwarmManager:
         ).stdout.strip()
 
         if git_sha:
-            self.session.add(FreshCommit(intent_id=intent.id, git_sha=git_sha))
+            session.add(FreshCommit(intent_id=intent.id, git_sha=git_sha))
 
         intent.status = "RESOLVED"
 
@@ -467,10 +589,7 @@ class SwarmManager:
         self.updates_since_sync += 1
 
         if self.updates_since_sync >= 5:
-            console.print(
-                "[bold cyan]Delta Vector Sync triggered. "
-                "Flushing Hot Context to LanceDB...[/bold cyan]"
-            )
+            console.print("[bold cyan]Delta Vector Sync triggered.[/bold cyan]")
             reindex_files(list(self.hot_context.keys()))
             self.hot_context.clear()
             self.updates_since_sync = 0

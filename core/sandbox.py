@@ -66,7 +66,7 @@ CMD ["pytest", "--maxfail=1", "--disable-warnings", "-v"]
             with open(dockerignore_path, "r", encoding="utf-8") as f:
                 original_ignore_content = f.read()
 
-        security_ignore = ".env\n.git\n.fresh\n__pycache__\n*.pyc\n"
+        security_ignore = ".env\n.git\n.fresh\n.fresh_worktrees\n__pycache__\n*.pyc\n"
         if original_ignore_content:
             security_ignore = original_ignore_content.rstrip() + "\n" + security_ignore
 

@@ -11,7 +11,9 @@ def get_engine():
     """Returns the SQLite engine."""
     # Ensure it connects to the local .fresh/ db
     sqlite_url = f"sqlite:///{DB_FILE}"
-    engine = create_engine(sqlite_url, echo=False)
+    engine = create_engine(
+        sqlite_url, echo=False, connect_args={"check_same_thread": False}
+    )
     return engine
 
 

@@ -13,9 +13,10 @@ class BuilderPod:
     its own output to write files directly.
     """
 
-    def __init__(self, override_model=None):
+    def __init__(self, override_model=None, interactive=True):
         base_model = override_model or get_global_model()
         self.model_name = os.environ.get("FRESH_MODEL", base_model)
+        self.interactive = interactive
 
     def execute_intent(
         self, intent: str, hot_context: dict = None
@@ -76,6 +77,9 @@ class BuilderPod:
                 response = completion(model=self.model_name, messages=message_history)
                 raw_response = response.choices[0].message.content
                 if "<PROMPT_DIRECTOR>" in raw_response:
+                    if not self.interactive:
+                        # Parallel mode: cannot prompt stdin, defer to human
+                        return raw_response, []
                     # Extract the question and prompt the user
                     question = (
                         re.search(

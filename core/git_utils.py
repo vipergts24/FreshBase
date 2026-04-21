@@ -68,3 +68,37 @@ def merge_intent_branch(intent_id: int) -> Tuple[bool, str]:
 def delete_branch(branch_name: str):
     """Force-deletes a local branch."""
     run_git_command(["branch", "-D", branch_name])
+
+
+def add_worktree(intent_id: int, base_branch: str = "main") -> Optional[str]:
+    """
+    Creates an isolated worktree directory for parallel agent execution.
+    Returns the worktree path if successful, None otherwise.
+    """
+    branch_name = f"fresh/intent-{intent_id}"
+    worktree_path = f".fresh_worktrees/intent-{intent_id}"
+
+    # Ensure the branch exists
+    create_intent_branch(intent_id)
+
+    # Create the worktree
+    code, out, err = run_git_command(["worktree", "add", worktree_path, branch_name])
+    if code != 0:
+        # Worktree may exist from a prior failed run; remove and retry
+        run_git_command(["worktree", "remove", "--force", worktree_path])
+        code, out, err = run_git_command(
+            ["worktree", "add", worktree_path, branch_name]
+        )
+
+    return worktree_path if code == 0 else None
+
+
+def remove_worktree(intent_id: int):
+    """Removes an intent's worktree directory and prunes git metadata."""
+    worktree_path = f".fresh_worktrees/intent-{intent_id}"
+    run_git_command(["worktree", "remove", "--force", worktree_path])
+
+
+def prune_worktrees():
+    """Cleans up stale worktree metadata from git."""
+    run_git_command(["worktree", "prune"])
