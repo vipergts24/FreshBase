@@ -14,6 +14,20 @@ class ShoppingCart:
         """
         self.items[name] = price
 
+    def apply_discount(self, percentage):
+        """
+        Apply a discount to all items in the cart.
+        
+        :param percentage: The discount percentage to be applied.
+        """
+        if not (0 <= percentage <= 100):
+            raise ValueError("Discount percentage must be between 0 and 100.")
+
+        for item in self.items:
+            original_price = self.items[item]
+            discount_amount = (percentage / 100) * original_price
+            self.items[item] = original_price - discount_amount
+
     def __repr__(self):
         """
         Provide a string representation of the shopping cart's contents.
