@@ -4,6 +4,7 @@ import re
 from litellm import completion
 from db.vector_store import search_code
 from rich.prompt import Prompt
+from core.config import get_global_model
 
 class BuilderPod:
     """
@@ -11,8 +12,9 @@ class BuilderPod:
     translating an Intent into an actionable codebase patch, and parsing
     its own output to write files directly.
     """
-    def __init__(self, model_name="gpt-4o"):
-        self.model_name = os.environ.get("FRESH_MODEL", model_name)
+    def __init__(self, override_model=None):
+        base_model = override_model or get_global_model()
+        self.model_name = os.environ.get("FRESH_MODEL", base_model)
         
     def execute_intent(self, intent: str, hot_context: dict = None) -> tuple[str, list[str]]:
         """
