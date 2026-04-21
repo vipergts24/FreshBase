@@ -19,23 +19,39 @@ class SandboxManager:
         and executes underlying framework tests (pytest for MVP).
         Returns (success_boolean, console_logs).
         """
-        # Determine if requirements.txt exists to auto-install dependencies
-        has_reqs = os.path.exists(os.path.join(self.root_dir, "requirements.txt"))
+        # Determine packaging state dynamically
+        req_path = os.path.join(self.root_dir, "requirements.txt")
+        has_reqs = os.path.exists(req_path)
+        has_setup = os.path.exists(os.path.join(self.root_dir, "setup.py")) or \
+                    os.path.exists(os.path.join(self.root_dir, "pyproject.toml"))
+
+        req_install_block = ""
+        if has_reqs:
+            # Layer Caching: Fetch requirements first to persist heavy dependencies across runs
+            req_install_block = "COPY requirements.txt /app/requirements.txt\\nRUN pip install --no-cache-dir -r /app/requirements.txt"
+            
+        pkg_install_block = ""
+        if has_setup:
+            pkg_install_block = "RUN pip install --no-cache-dir -e ."
 
         dockerfile_content = f"""
 FROM python:3.10-slim
 
-# Set up the isolated directory
+# Setup pristine configuration preventing bytecode and enabling directory-agnostic modules
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
+
 WORKDIR /app
 
-# Copy the host codebase inside
+# Enable aggressive Layer Caching for pip installs securely
+{req_install_block}
+
+# Copy the actual structure down sequentially
 COPY . /app
 
-# Install isolated test framework
+# Install isolated test framework and native structural package
 RUN pip install --no-cache-dir pytest
-
-# Install project package natively instead of hardcoded requirements
-RUN pip install --no-cache-dir -e .
+{pkg_install_block}
 
 # Enforce deterministic testing
 CMD ["pytest", "--maxfail=1", "--disable-warnings", "-v"]

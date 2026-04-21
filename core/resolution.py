@@ -78,6 +78,29 @@ class ResolutionSwarm:
 
         refactor_proposal, applied_files = self.builder.execute_intent(prompt_intent)
 
+        # 5. Verify the LLM structural repair locally
+        success_after_refactor, post_logs = self.sandbox.execute_tests()
+
+        if not success_after_refactor:
+            run_git_command(["checkout", "main"])
+            run_git_command(["branch", "-D", shadow_branch])
+            return f"[RESOLUTION SWARM FAILED]\\nThe AI attempted to fix downstream code but failed verification:\\n{post_logs}"
+
+        # 6. Secure the fix locally on the shadow branch
+        os.system('black . > /dev/null 2>&1')
+        run_git_command(["add", "."])
+        run_git_command(["commit", "--no-verify", "-m", f"FreshBase Semantic Resolve: Reverted Intent {target_intent_id} Locally"])
+
+        # 7. Merge gracefully back into main and cleanup
+        run_git_command(["checkout", "main"])
+        run_git_command(["merge", "--squash", shadow_branch])
+        run_git_command(["commit", "--no-verify", "-m", f"FreshBase Swarm Auto-Merge: Intent {target_intent_id} Resolution"])
+        run_git_command(["branch", "-D", shadow_branch])
+
+        # 8. Mark complete conceptually
+        intent.status = "REVERTED"
+        self.session.commit()
+
         applied_str = (
             "\\n  - ".join(applied_files) if applied_files else "No files modified."
         )
@@ -85,6 +108,6 @@ class ResolutionSwarm:
         return (
             f"[SEMANTIC CONFLICT DETECTED]\\n"
             f"Downstream tests failed. The Resolution Swarm analyzed the failure "
-            f"and applied the following autonomous repair:\\n\\n{refactor_proposal}\\n\\n"
+            f"and applied the following autonomous repair natively into main:\\n\\n{refactor_proposal}\\n\\n"
             f"Files patched:\\n  - {applied_str}"
         )
