@@ -66,10 +66,13 @@ class ResolutionSwarm:
             f"the tests pass again, WITHOUT relying on the logic from Intent '{intent.description}'."
         )
         
-        refactor_proposal = self.builder.propose_implementation(prompt_intent)
+        refactor_proposal, applied_files = self.builder.execute_intent(prompt_intent)
+        
+        applied_str = "\\n  - ".join(applied_files) if applied_files else "No files modified."
         
         return (
             f"[SEMANTIC CONFLICT DETECTED]\\n"
             f"Downstream tests failed. The Resolution Swarm analyzed the failure "
-            f"and proposed the following autonomous repair strategy:\\n\\n{refactor_proposal}"
+            f"and applied the following autonomous repair:\\n\\n{refactor_proposal}\\n\\n"
+            f"Files patched:\\n  - {applied_str}"
         )

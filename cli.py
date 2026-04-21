@@ -34,16 +34,23 @@ from core.agent import BuilderPod
 @app.command()
 def build(intent: str):
     """
-    Submits an intent directly to the Builder Pod for a code proposal.
+    Submits an intent directly to the Builder Pod for a code proposal and applies it.
     """
     console.print(f"[bold magenta]Assigning intent to Builder Pod:[/bold magenta] {intent}")
     pod = BuilderPod()
     
-    with console.status("[bold yellow]Agent Swarm is analyzing codebase and synthesizing logic...[/bold yellow]", spinner="dots"):
-        response = pod.propose_implementation(intent)
+    with console.status("[bold yellow]Agent Swarm is synthesizing logic and modifying files...[/bold yellow]", spinner="dots"):
+        response, applied_files = pod.execute_intent(intent)
         
     console.print("\n[bold cyan]Builder Pod Output:[/bold cyan]")
     console.print(response)
+    
+    if applied_files:
+        console.print("\n[bold green]Files successfully written to disk by Agent:[/bold green]")
+        for f in applied_files:
+            console.print(f"  - {f}")
+    else:
+        console.print("\n[bold yellow]No structural <FILE> modifications were detected in the Agent's output.[/bold yellow]")
 
 from core.sandbox import SandboxManager
 

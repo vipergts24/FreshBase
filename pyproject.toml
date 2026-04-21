@@ -20,3 +20,7 @@ dependencies = [
 
 [project.scripts]
 fresh = "cli:app"
+
+[tool.setuptools]
+py-modules = ["cli"]
+packages = ["core", "db"]
