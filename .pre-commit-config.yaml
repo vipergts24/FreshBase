@@ -1,0 +1,11 @@
+repos:
+-   repo: https://github.com/psf/black
+    rev: 23.3.0
+    hooks:
+    -   id: black
+-   repo: https://github.com/PyCQA/pylint
+    rev: v2.17.4
+    hooks:
+    -   id: pylint
+        args:
+        - --disable=C,R,W,import-error

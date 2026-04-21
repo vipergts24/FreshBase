@@ -1,6 +1,13 @@
 # Getting Started with FreshBase
 
 FreshBase is designed to be a globally available orchestration tool on your machine. You can use it across as many repositories as you want. 
+## Prerequisites
+Before taking command of the FreshBase orchestrator, ensure your host machine has the following tools installed and accessible on your system `$PATH`:
+- **Python 3.9+** and **pip** (For core execution and LiteLLM routing).
+- **Git** (For version control tracking and native branch intent hooking).
+- **Docker Desktop** (Or an equivalent active daemon. This is specifically required by `core/sandbox.py` to spin up ephemeral containers for regression verification).
+- **An API Key** (OpenAI, Anthropic, DeepSeek, etc.).
+
 
 ## Step 1: Install the `fresh` CLI globally
 The FreshBase codebase acts as a standard Python library. You should install this CLI tool onto your machine globally.
@@ -12,9 +19,14 @@ pip install -e .
 *(This installs FreshBase in "editable mode". Any updates or custom forks instantly apply to your global `fresh` CLI).*
 
 ## Step 2: Configure your Environment
-FreshBase uses OpenAI for embeddings and logic synthesis via LiteLLM. Create a `.env` file at the root of the targeted repository you are working in:
+FreshBase uses LiteLLM internally, giving you full control over exactly which LLM you want to use. You can globally set your preferred model across all repositories:
 ```bash
-OPENAI_API_KEY="sk-..."
+fresh config
+```
+Follow the interactive prompt to set your preferred reasoning agent (DeepSeek, Anthropic, or OpenAI). Then, create a `.env` file at the root of the targeted repository housing the exact API key the CLI told you:
+```bash
+# E.g., if you selected DeepSeek:
+DEEPSEEK_API_KEY="sk-..."
 ```
 
 ## Step 3: Initialize a Target Repository
@@ -50,4 +62,16 @@ fresh swarm
 ```
 *The Swarm Manager cycles through the pending intents, maintains memory vectors across modifications to prevent Context Drift, fires up Sandboxed validation suites to deterministically test the code before it is allowed in the repository, and explicitly commits the diff securely.*
 
-For advanced test commands, please see [5. Demo Scenarios](5_DEMO_SCENARIOS.md).
+## Step 7: Swarm Execution Logs and Working Out-of-Band
+Because FreshBase installs a native `.git/hooks/post-commit` into your repository on initialization, **you do not have to abandon your normal workflow**. 
+
+If you use `git commit` to write a manual change (or if you use tools like *Claude Code* to push a change), the hook instantly registers that standard commit directly into your SQLite intent tracking instance.
+
+To view everything the Swarm has executed, along with all natively-tracked manual human commits, simply run:
+```bash
+# Append -v or --verbose to view full descriptions!
+fresh log 
+```
+Every Intent and out-of-band commit is uniquely ID mapped, so if you accidentally break the repository using another tool, you can simply type `fresh revert <ID>` to natively trigger a Resolution Swarm!
+
+For advanced test commands and Swarm collision mapping, please see [5. Demo Scenarios](5_DEMO_SCENARIOS.md).
