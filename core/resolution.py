@@ -20,6 +20,10 @@ class ResolutionSwarm:
         self.session: Session = get_session()
         self.builder = BuilderPod()
         self.sandbox = SandboxManager()
+        # Remember the user's starting branch so we never hijack it
+        from core.git_utils import get_current_branch
+
+        self.original_branch = get_current_branch() or "main"
 
     def execute_semantic_revert(self, target_intent_id: str) -> str:
         try:
@@ -65,7 +69,13 @@ class ResolutionSwarm:
             else:
                 failure_logs = logs
         else:
-            failure_logs = "Merge conflict textually blocked the revert:\\n" + err
+            # Conflict: capture the diff for the LLM then reset to a clean state
+            _, conflict_diff, _ = run_git_command(["diff"])
+            run_git_command(["revert", "--abort"])
+            failure_logs = (
+                f"Merge conflict when reverting — downstream code depends on this intent.\n"
+                f"Conflict diff:\n{conflict_diff[-1500:]}"
+            )
 
         # 4. RESOLUTION SWARM ACTIVATION
         prompt_intent = (
@@ -83,7 +93,7 @@ class ResolutionSwarm:
         success_after_refactor, post_logs = self.sandbox.execute_tests()
 
         if not success_after_refactor:
-            run_git_command(["checkout", "main"])
+            run_git_command(["checkout", self.original_branch])
             run_git_command(["branch", "-D", shadow_branch])
             return f"[RESOLUTION SWARM FAILED]\\nThe AI attempted to fix downstream code but failed verification:\\n{post_logs}"
 
@@ -102,8 +112,8 @@ class ResolutionSwarm:
             ]
         )
 
-        # 7. Merge gracefully back into main and cleanup
-        run_git_command(["checkout", "main"])
+        # 7. Merge gracefully back into original branch and cleanup
+        run_git_command(["checkout", self.original_branch])
         run_git_command(["merge", "--squash", shadow_branch])
         run_git_command(
             [
