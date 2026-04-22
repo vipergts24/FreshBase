@@ -17,3 +17,14 @@ class ShoppingCart:
         else:
             # If the item does not exist, add it with quantity 1
             self.items[name] = (price, 1)
+
+    def apply_discount(self, percentage):
+        """
+        Apply a discount to all items in the shopping cart.
+
+        :param percentage: The discount percentage to apply.
+        """
+        for name in self.items:
+            price, quantity = self.items[name]
+            discounted_price = price * (1 - percentage / 100)
+            self.items[name] = (discounted_price, quantity)
