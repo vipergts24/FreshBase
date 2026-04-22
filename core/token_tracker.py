@@ -213,7 +213,7 @@ class TokenTracker:
 
     def render_summary(self):
         """Render a detailed Rich Panel for end-of-session summary."""
-        elapsed = datetime.datetime.utcnow() - self.start_time
+        elapsed = datetime.now(timezone.utc) - self.start_time
         minutes = int(elapsed.total_seconds() // 60)
         seconds = int(elapsed.total_seconds() % 60)
 
