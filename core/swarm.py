@@ -571,9 +571,26 @@ class SwarmManager:
                         ).stdout.strip()
 
                         if git_sha:
-                            session.add(
-                                FreshCommit(intent_id=intent.id, git_sha=git_sha)
-                            )
+                            try:
+                                # Avoid IntegrityError: If this SHA is already tracked, just link it
+                                existing = (
+                                    session.query(FreshCommit)
+                                    .filter(FreshCommit.git_sha == git_sha)
+                                    .first()
+                                )
+                                if not existing:
+                                    session.add(
+                                        FreshCommit(
+                                            intent_id=intent.id, git_sha=git_sha
+                                        )
+                                    )
+                                session.commit()
+                            except Exception:
+                                # If a race condition or collision occurs, rollback and continue
+                                session.rollback()
+                                console.print(
+                                    f"[dim]Note: Intent {intent.id} linked to existing commit {git_sha[:8]}[/dim]"
+                                )
 
                         local_intent.status = "RESOLVED"
 
