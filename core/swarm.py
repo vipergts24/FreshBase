@@ -75,6 +75,11 @@ class SwarmManager:
         and dispatches execution groups in parallel.
         """
         session = get_session()
+        # Record the current branch so we can return to it later
+        from core.git_utils import get_current_branch
+
+        self.original_branch = get_current_branch() or "main"
+
         try:
             # Recovery Logic: Recover orphaned intents from crashed prior runs
             stale = (
@@ -662,11 +667,12 @@ class SwarmManager:
 
     def _recover_git_state(self):
         """
-        Ensure the repo is on main in a clean state, regardless of
-        what happened during execution. Called in the finally block.
+        Ensure the repo is back on the original branch in a clean state.
+        Called in the finally block.
         """
         try:
-            run_git_command(["checkout", "main"])
+            target = getattr(self, "original_branch", "main")
+            run_git_command(["checkout", target])
             run_git_command(["reset", "--hard", "HEAD"])
             run_git_command(["clean", "-fd"])
             prune_worktrees()
