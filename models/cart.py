@@ -14,3 +14,7 @@ class ShoppingCart:
             discount_amount = original_price * (percentage / 100)
             new_price = original_price - discount_amount
             self.items[item] = new_price
+
+    def checkout(self):
+        # Return the total sum of all the item's prices in the cart
+        return sum(self.items.values())
