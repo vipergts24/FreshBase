@@ -488,8 +488,33 @@ class SwarmManager:
                         else:
                             console.print(
                                 f"[bold yellow]Intent {local_intent.id}: "
-                                f"No code files generated.[/bold yellow]"
+                                f"No code files generated. Agent verified "
+                                f"goal is already satisfied.[/bold yellow]"
                             )
+                            local_intent.status = "RESOLVED"
+
+                            # Link current state to this intent so it can be reverted/tracked
+                            from core.git_utils import get_latest_commit_sha
+
+                            git_sha = get_latest_commit_sha()
+                            if git_sha:
+                                try:
+                                    existing = (
+                                        thread_session.query(FreshCommit)
+                                        .filter(FreshCommit.git_sha == git_sha)
+                                        .first()
+                                    )
+                                    if not existing:
+                                        thread_session.add(
+                                            FreshCommit(
+                                                intent_id=local_intent.id,
+                                                git_sha=git_sha,
+                                            )
+                                        )
+                                except Exception:
+                                    thread_session.rollback()
+
+                            thread_session.commit()
                             self._completed[local_intent.id] = {
                                 "branch": f"fresh/intent-{local_intent.id}",
                                 "files": [],
