@@ -2,11 +2,11 @@ import subprocess
 from typing import Optional, Tuple
 
 
-def run_git_command(command: list[str]) -> Tuple[int, str, str]:
+def run_git_command(command: list[str], cwd: str = None) -> Tuple[int, str, str]:
     """Runs a git command and returns (returncode, stdout, stderr)."""
     try:
         result = subprocess.run(
-            ["git"] + command, capture_output=True, text=True, check=False
+            ["git"] + command, capture_output=True, text=True, check=False, cwd=cwd
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except Exception as e:
@@ -53,13 +53,13 @@ def create_intent_branch(intent_id: int) -> Optional[str]:
     return branch_name if code == 0 else None
 
 
-def merge_intent_branch(intent_id: int) -> Tuple[bool, str]:
+def merge_intent_branch(intent_id: int, cwd: str = None) -> Tuple[bool, str]:
     """
     Squash-merges an intent branch back into main.
     Returns (success, error_message).
     """
     branch_name = f"fresh/intent-{intent_id}"
-    code, out, err = run_git_command(["merge", "--squash", branch_name])
+    code, out, err = run_git_command(["merge", "--squash", branch_name], cwd=cwd)
     if code != 0:
         return False, err
     return True, ""
@@ -102,3 +102,18 @@ def remove_worktree(intent_id: int):
 def prune_worktrees():
     """Cleans up stale worktree metadata from git."""
     run_git_command(["worktree", "prune"])
+
+
+def is_repo_dirty(cwd: str = None) -> bool:
+    """Returns True if there are uncommitted or untracked changes."""
+    # --porcelain=v1 provides a machine-readable output.
+    # If it's not empty, the repo is dirty.
+    code, out, _ = run_git_command(["status", "--porcelain"], cwd=cwd)
+    return bool(out.strip())
+
+
+def commit_changes(message: str, cwd: str = None) -> bool:
+    """Stages all changes and commits them."""
+    run_git_command(["add", "."], cwd=cwd)
+    code, _, _ = run_git_command(["commit", "-m", message], cwd=cwd)
+    return code == 0

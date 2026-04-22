@@ -70,3 +70,37 @@ def set_max_intents(count: int):
 
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
+
+
+def get_sandbox_type():
+    """
+    Reads the preferred sandbox engine from ~/.freshconfig.
+    Returns 'uv' as default if not configured.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        return "uv"
+
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("sandbox_type", "uv")
+    except Exception:
+        return "uv"
+
+
+def set_sandbox_type(sandbox_type: str):
+    """
+    Writes the selected sandbox type to ~/.freshconfig.
+    """
+    data = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+
+    data["sandbox_type"] = sandbox_type
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)

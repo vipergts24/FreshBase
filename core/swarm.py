@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db.models import Intent, FreshCommit, Run
@@ -28,8 +29,11 @@ from core.git_utils import (
     add_worktree,
     remove_worktree,
     prune_worktrees,
+    is_repo_dirty,
+    commit_changes,
 )
 from rich.console import Console
+from rich.prompt import Prompt, Confirm
 
 console = Console()
 
@@ -43,6 +47,7 @@ def _format_files(file_list: list[str], cwd: str = None):
     if not py_files:
         return
     try:
+        # If cwd is provided, files are relative to it
         cmd = ["black", "--quiet"] + py_files
         subprocess.run(cmd, capture_output=True, cwd=cwd)
     except Exception:
@@ -71,7 +76,7 @@ class SwarmManager:
         """
         session = get_session()
         try:
-            # Recover orphaned intents from crashed prior runs
+            # Recovery Logic: Recover orphaned intents from crashed prior runs
             stale = (
                 session.query(Intent)
                 .filter(Intent.status.in_(["IN_PROGRESS", "NEEDS_REVIEW"]))
@@ -94,6 +99,55 @@ class SwarmManager:
                     "Vector Metastore.[/bold yellow]"
                 )
                 return
+
+            # --- HUMAN SAFETY NET INTERCEPTOR ---
+            if is_repo_dirty():
+                console.print(
+                    "\n[bold yellow]⚠️  UNCOMMITTED CHANGES DETECTED  ⚠️[/bold yellow]"
+                )
+                console.print(
+                    "To prevent data loss, you should secure your work before the swarm starts."
+                )
+
+                choice = Prompt.ask(
+                    "What would you like to do?",
+                    choices=["s", "c", "a"],
+                    default="s",
+                )
+                # s = stash, c = commit, a = abort
+
+                if choice == "a":
+                    console.print("[bold red]Swarm aborted by user.[/bold red]")
+                    return
+                elif choice == "c":
+                    msg = Prompt.ask(
+                        "Enter commit message", default="FreshBase: Manual checkpoint"
+                    )
+                    if commit_changes(msg):
+                        console.print(
+                            "[bold green]Changes committed successfully.[/bold green]"
+                        )
+                    else:
+                        console.print(
+                            "[bold red]Commit failed. Aborting swarm.[/bold red]"
+                        )
+                        return
+                elif choice == "s":
+                    # We use a dedicated stash name for easy recovery
+                    subprocess.run(
+                        [
+                            "git",
+                            "stash",
+                            "push",
+                            "-u",
+                            "-m",
+                            f"FreshBase Safety Stash: {int(time.time())}",
+                        ]
+                    )
+                    console.print(
+                        "[bold green]Changes stashed successfully. (Recover with `git stash pop`)[/bold green]"
+                    )
+            # --- END INTERCEPTOR ---
 
             # Auto-index if the vector store is empty (Q22)
             self._ensure_indexed()
@@ -304,17 +358,15 @@ class SwarmManager:
                 abs_worktree = os.path.abspath(worktree_path)
 
                 # Execute the BuilderPod targeting the worktree directory
-                builder = BuilderPod(interactive=False, tracker=self.tracker)
+                builder = BuilderPod(
+                    interactive=False, tracker=self.tracker, project_root=abs_worktree
+                )
                 merged_context = {**self.hot_context, **group_hot_context}
 
                 # Trim hot context to fit within model's context window (Q24)
                 merged_context = self.tracker.trim_hot_context(
                     merged_context, builder.model_name
                 )
-
-                # Save CWD and switch to worktree for file writes
-                original_cwd = os.getcwd()
-                os.chdir(abs_worktree)
 
                 try:
                     response, applied_files = builder.execute_intent(
@@ -430,7 +482,8 @@ class SwarmManager:
                             }
 
                 finally:
-                    os.chdir(original_cwd)
+                    # No longer need os.chdir cleanup
+                    pass
 
                 # Clean up the worktree (branch is preserved for merge)
                 remove_worktree(local_intent.id)
@@ -440,11 +493,6 @@ class SwarmManager:
                     f"[bold red]Exception during intent {local_intent.id}: "
                     f"{str(e)}[/bold red]"
                 )
-                # Ensure we're back in the original directory
-                try:
-                    os.chdir(original_cwd)
-                except Exception:
-                    pass
                 remove_worktree(local_intent.id)
                 self._completed[local_intent.id] = {
                     "branch": f"fresh/intent-{local_intent.id}",

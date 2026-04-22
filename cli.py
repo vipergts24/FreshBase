@@ -21,7 +21,7 @@ from core.agent import BuilderPod
 from core.sandbox import SandboxManager
 from core.resolution import ResolutionSwarm
 from core.swarm import SwarmManager
-from core.config import set_global_model
+from core.config import set_global_model, set_sandbox_type
 
 app = typer.Typer(help="FreshBase: Autonomous Semantic Code Collaboration")
 console = Console()
@@ -162,11 +162,29 @@ def config():
     model_name, key_name = model_map[choice]
     set_global_model(model_name)
 
+    # Sandbox Engine Configuration
+    console.print("\n[bold cyan]Select your preferred Sandbox Engine:[/bold cyan]")
+    console.print(
+        "1. [bold white]uv[/bold white] (Host-venv: Ultra Fast, Low Isolation)"
+    )
+    console.print(
+        "2. [bold white]docker[/bold white] (Container: Slow, High Isolation)"
+    )
+
+    sb_choice = Prompt.ask(
+        "Enter choice",
+        choices=["1", "2"],
+        default="1",
+    )
+    sb_type = "uv" if sb_choice == "1" else "docker"
+    set_sandbox_type(sb_type)
+
     console.print(
         f"\n[bold green]Success![/bold green] Global model set to [bold white]{model_name}[/bold white]."
     )
+    console.print(f"Sandbox Engine set to [bold white]{sb_type}[/bold white].")
     console.print(
-        f"Please ensure you add the following to your [bold yellow].env[/bold yellow] file in your project root:"
+        f"\nPlease ensure you add the following to your [bold yellow].env[/bold yellow] file in your project root:"
     )
     console.print(f'[bold cyan]{key_name}="your-api-key-here"[/bold cyan]')
 

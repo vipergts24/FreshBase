@@ -6,6 +6,7 @@ from db.vector_store import search_code
 from rich.prompt import Prompt
 from rich.console import Console
 from core.config import get_global_model
+from core.fs_utils import ProjectContext
 
 # Transient HTTP errors that warrant retry
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -22,11 +23,14 @@ class BuilderPod:
     its own output to write files directly.
     """
 
-    def __init__(self, override_model=None, interactive=True, tracker=None):
+    def __init__(
+        self, override_model=None, interactive=True, tracker=None, project_root=None
+    ):
         base_model = override_model or get_global_model()
         self.model_name = os.environ.get("FRESH_MODEL", base_model)
         self.interactive = interactive
         self.tracker = tracker
+        self.ctx = ProjectContext(project_root)
 
     def execute_intent(
         self, intent: str, hot_context: dict = None
@@ -176,60 +180,32 @@ class BuilderPod:
         )
         matches = pattern.findall(agent_output)
 
-        project_root = os.path.abspath(os.getcwd())
         applied = []
 
         for path_match, code_match in matches:
             path = path_match.strip()
 
-            # ---- PATH SECURITY SANDBOX ----
-            # Reject absolute paths immediately
-            if os.path.isabs(path):
-                console.print(
-                    f"[bold red]SECURITY BLOCK: Absolute path rejected: "
-                    f"{path}[/bold red]"
-                )
+            try:
+                # Use ProjectContext to safely resolve the path
+                resolved = self.ctx.resolve(path)
+            except ValueError as e:
+                console.print(f"[bold red]SECURITY BLOCK: {str(e)}[/bold red]")
                 continue
-
-            # Reject any path containing traversal components
-            normalized = os.path.normpath(path)
-            if normalized.startswith("..") or "/.." in normalized:
-                console.print(
-                    f"[bold red]SECURITY BLOCK: Path traversal rejected: "
-                    f"{path}[/bold red]"
-                )
-                continue
-
-            # Resolve the full path and verify it's within the project root
-            resolved = os.path.abspath(os.path.join(project_root, normalized))
-            if (
-                not resolved.startswith(project_root + os.sep)
-                and resolved != project_root
-            ):
-                console.print(
-                    f"[bold red]SECURITY BLOCK: Path escapes project root: "
-                    f"{path} → {resolved}[/bold red]"
-                )
-                continue
-            # ---- END PATH SECURITY SANDBOX ----
 
             # Stage existing file in git before overwrite (Q20 safety net)
-            if os.path.exists(resolved):
+            if self.ctx.exists(path):
                 import subprocess
 
+                # Use the project root as CWD for git command
                 subprocess.run(
-                    ["git", "add", resolved],
-                    capture_output=True,
+                    ["git", "add", resolved], capture_output=True, cwd=self.ctx.root
                 )
 
             # Strip a single leading and trailing newline to prevent whitespace drift
             code = code_match.strip("\n")
 
-            # Create directories within the project boundary
-            os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
-
-            with open(resolved, "w", encoding="utf-8") as f:
-                f.write(code)
+            # Safely write using the context
+            self.ctx.write_text(path, code)
             applied.append(path)
 
         return applied
