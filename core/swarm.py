@@ -326,9 +326,15 @@ class SwarmManager:
         """
         Execute a sequential chain of intents on isolated worktrees.
         Each thread gets its own SQLAlchemy session.
+        Intents within a group build on each other sequentially.
         """
         thread_session = get_session()
         group_hot_context = {}
+
+        # Chained Dependency Logic: Start from the active branch, then build on each success
+        from core.git_utils import get_current_branch
+
+        current_base_branch = get_current_branch() or "main"
 
         for intent in group:
             # Re-fetch the intent in this thread's session
@@ -344,8 +350,10 @@ class SwarmManager:
                 local_intent.status = "IN_PROGRESS"
                 thread_session.commit()
 
-                # Create an isolated worktree for this intent
-                worktree_path = add_worktree(local_intent.id)
+                # Create an isolated worktree branched from the current chain head
+                worktree_path = add_worktree(
+                    local_intent.id, base_branch=current_base_branch
+                )
                 if not worktree_path:
                     console.print(
                         f"[bold red]Failed to create worktree for "
@@ -445,6 +453,8 @@ class SwarmManager:
                                 "files": applied_files,
                                 "status": "PASSED",
                             }
+                            # Chain the next intent in this group to this successful branch
+                            current_base_branch = f"fresh/intent-{local_intent.id}"
                         else:
                             console.print(
                                 f"[bold red]Intent {local_intent.id}: "

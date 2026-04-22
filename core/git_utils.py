@@ -41,15 +41,15 @@ def get_latest_commit_sha() -> Optional[str]:
     return out if code == 0 else None
 
 
-def create_intent_branch(intent_id: int) -> Optional[str]:
-    """Creates an isolated branch from main HEAD for parallel agent work."""
+def create_intent_branch(intent_id: int, base_branch: str = "main") -> Optional[str]:
+    """Creates an isolated branch from a specified base (defaults to main) for agent work."""
     branch_name = f"fresh/intent-{intent_id}"
-    # Always branch from main to ensure clean isolation
-    code, _, _ = run_git_command(["branch", branch_name, "main"])
+    # Branch from the specified base to allow sequential chaining
+    code, _, _ = run_git_command(["branch", branch_name, base_branch])
     if code != 0:
         # Branch may already exist from a prior failed run; reset it
         run_git_command(["branch", "-D", branch_name])
-        code, _, _ = run_git_command(["branch", branch_name, "main"])
+        code, _, _ = run_git_command(["branch", branch_name, base_branch])
     return branch_name if code == 0 else None
 
 
@@ -73,13 +73,13 @@ def delete_branch(branch_name: str):
 def add_worktree(intent_id: int, base_branch: str = "main") -> Optional[str]:
     """
     Creates an isolated worktree directory for parallel agent execution.
-    Returns the worktree path if successful, None otherwise.
+    Branches from base_branch to support sequential dependency chaining.
     """
     branch_name = f"fresh/intent-{intent_id}"
     worktree_path = f".fresh_worktrees/intent-{intent_id}"
 
-    # Ensure the branch exists
-    create_intent_branch(intent_id)
+    # Ensure the branch exists, potentially branched from a predecessor
+    create_intent_branch(intent_id, base_branch=base_branch)
 
     # Create the worktree
     code, out, err = run_git_command(["worktree", "add", worktree_path, branch_name])
