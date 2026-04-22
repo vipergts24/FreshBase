@@ -122,9 +122,16 @@ class UvSandboxManager(SandboxBase):
             # if a pyproject.toml or requirements.txt is present.
             cmd = ["uv", "run", "pytest", "--maxfail=1", "--disable-warnings", "-v"]
 
-            # If no pyproject.toml/requirements.txt exists, uv run might fail to find pytest
-            # We can fallback to ensuring pytest is installed in a temporary venv
-            res = subprocess.run(cmd, capture_output=True, text=True, cwd=self.root_dir)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                f"{self.root_dir}:{env['PYTHONPATH']}"
+                if "PYTHONPATH" in env
+                else self.root_dir
+            )
+
+            res = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=self.root_dir, env=env
+            )
 
             success = res.returncode == 0
             logs = res.stdout + "\\n" + res.stderr
