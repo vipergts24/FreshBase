@@ -581,8 +581,12 @@ class SwarmManager:
                 with _merge_lock:
                     from core.git_utils import apply_intent_incremental
 
-                    base_branch = result.get("base_branch", "main")
-                    success, err = apply_intent_incremental(intent.id, base_branch)
+                    # Always diff against the current state of the target branch.
+                    # As each intent merges, the target branch advances, so this
+                    # naturally captures only each intent's incremental contribution.
+                    success, err = apply_intent_incremental(
+                        intent.id, self.original_branch
+                    )
 
                     if success:
                         # Stage and commit the incremental change
@@ -643,7 +647,7 @@ class SwarmManager:
 
                         console.print(
                             f"[bold green]Intent {intent.id}: "
-                            f"Successfully merged into main.[/bold green]"
+                            f"Successfully merged into {self.original_branch}.[/bold green]"
                         )
                     else:
                         console.print(
