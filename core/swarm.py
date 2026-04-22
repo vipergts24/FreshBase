@@ -455,6 +455,7 @@ class SwarmManager:
 
                             self._completed[local_intent.id] = {
                                 "branch": f"fresh/intent-{local_intent.id}",
+                                "base_branch": current_base_branch,
                                 "files": applied_files,
                                 "status": "PASSED",
                             }
@@ -517,6 +518,7 @@ class SwarmManager:
                             thread_session.commit()
                             self._completed[local_intent.id] = {
                                 "branch": f"fresh/intent-{local_intent.id}",
+                                "base_branch": current_base_branch,
                                 "files": [],
                                 "status": "NO_OUTPUT",
                             }
@@ -570,17 +572,20 @@ class SwarmManager:
 
             branch = result["branch"]
 
-            if result["status"] == "PASSED":
+            if result["status"] == "PASSED" or result["status"] == "NO_OUTPUT":
                 console.print(
                     f"[bold cyan]Merging Intent {intent.id} "
-                    f"into main...[/bold cyan]"
+                    f"into {self.original_branch}...[/bold cyan]"
                 )
 
                 with _merge_lock:
-                    success, err = merge_intent_branch(intent.id)
+                    from core.git_utils import apply_intent_incremental
+
+                    base_branch = result.get("base_branch", "main")
+                    success, err = apply_intent_incremental(intent.id, base_branch)
 
                     if success:
-                        _format_files(result["files"])
+                        # Stage and commit the incremental change
                         run_git_command(["add", "."])
                         run_git_command(
                             [

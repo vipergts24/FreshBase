@@ -1,3 +1,4 @@
+import os
 import subprocess
 from typing import Optional, Tuple
 
@@ -117,3 +118,36 @@ def commit_changes(message: str, cwd: str = None) -> bool:
     run_git_command(["add", "."], cwd=cwd)
     code, _, _ = run_git_command(["commit", "-m", message], cwd=cwd)
     return code == 0
+
+
+def apply_intent_incremental(intent_id: int, base_branch: str) -> Tuple[bool, str]:
+    """
+    Applies the incremental diff of an intent branch relative to its base.
+    This avoids squash-merge collisions in sequential chains.
+    """
+    branch_name = f"fresh/intent-{intent_id}"
+    # Get the diff between the base and the intent branch
+    code, out, err = run_git_command(["diff", f"{base_branch}..{branch_name}"])
+    if code != 0:
+        return False, f"Failed to generate incremental diff: {err}"
+
+    if not out.strip():
+        return True, "No changes to apply."
+
+    # Apply the diff to the current working tree
+    # Use a temporary file for the patch
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".patch", delete=False) as f:
+        f.write(out)
+        patch_path = f.name
+
+    try:
+        # Apply the patch with --3way for better conflict resolution
+        code, out, err = run_git_command(["apply", "--3way", patch_path])
+        if code != 0:
+            return False, f"Failed to apply incremental patch: {err}"
+        return True, ""
+    finally:
+        if os.path.exists(patch_path):
+            os.remove(patch_path)
