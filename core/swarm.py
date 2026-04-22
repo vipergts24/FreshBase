@@ -520,6 +520,8 @@ class SwarmManager:
                                 "files": [],
                                 "status": "NO_OUTPUT",
                             }
+                            # Maintain the chain even for no-output resolutions
+                            current_base_branch = f"fresh/intent-{local_intent.id}"
 
                 finally:
                     # No longer need os.chdir cleanup
