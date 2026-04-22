@@ -25,3 +25,6 @@ fresh = "cli:app"
 [tool.setuptools]
 py-modules = ["cli"]
 packages = ["core", "db"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
